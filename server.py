@@ -16,6 +16,8 @@ import argparse
 import base64
 import copy
 import io
+import subprocess
+import sys
 import threading
 
 import torch
@@ -34,6 +36,50 @@ global_model = SimpleNet()
 client_weights: dict = {}        # { client_id: state_dict }
 current_round: int = 0
 lock = threading.Lock()
+
+
+# ─────────────────────────────────────── firewall helper ─────
+
+def ensure_firewall_rule(port: int) -> None:
+    """
+    On Windows, adds an inbound TCP firewall rule for `port` if one
+    does not already exist.  Silently skips on non-Windows or if the
+    current process lacks admin rights.
+    """
+    if sys.platform != "win32":
+        return
+
+    rule_name = "FL_Server"
+
+    # Check whether the rule already exists
+    check = subprocess.run(
+        ["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"],
+        capture_output=True, text=True
+    )
+    if "No rules match" not in check.stdout and check.returncode == 0:
+        print(f"  🔓  Firewall rule '{rule_name}' already exists — skipping.")
+        return
+
+    # Try to add the rule (requires elevated privileges)
+    result = subprocess.run(
+        [
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            f"name={rule_name}",
+            "dir=in",
+            "action=allow",
+            "protocol=TCP",
+            f"localport={port}",
+        ],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        print(f"  🔓  Firewall rule added: TCP inbound port {port}")
+    else:
+        print(
+            f"  ⚠️   Could not add firewall rule (run as Administrator to auto-configure).\n"
+            f"      Manual fix:  New-NetFirewallRule -DisplayName 'FL Server' "
+            f"-Direction Inbound -Protocol TCP -LocalPort {port} -Action Allow"
+        )
 
 
 # ─────────────────────────────────────── helpers ─────────────
@@ -154,7 +200,7 @@ def status():
 def main():
     global NUM_CLIENTS, TOTAL_ROUNDS
 
-    parser = argparse.ArgumentParser(description="FL Server")
+    parser = argparse.ArgumentParser(description="FL_Server")
     parser.add_argument("--clients", type=int,   default=2,    help="Number of edge clients (default: 2)")
     parser.add_argument("--rounds",  type=int,   default=10,   help="Total FL rounds (default: 10)")
     parser.add_argument("--port",    type=int,   default=5000, help="Server port (default: 5000)")
@@ -170,6 +216,8 @@ def main():
     print(f"  Total rounds     : {TOTAL_ROUNDS}")
     print(f"  Listening on     : 0.0.0.0:{args.port}")
     print("=" * 50)
+
+    ensure_firewall_rule(args.port)
 
     app.run(host="0.0.0.0", port=args.port, debug=False)
 
