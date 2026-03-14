@@ -1,28 +1,34 @@
 """
-model.py - Shared model definition (copy this file to both server and client PCs)
+model.py  —  Shared model definition (copy this file to all PCs)
+─────────────────────────────────────────────────────────────────
+MobileNetV2 fine-tuned for PlantVillage plant disease classification.
+  Input  : 224x224 RGB image
+  Output : NUM_CLASSES logits  (default 38 — PlantVillage)
 """
 
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from torchvision import models
+
+NUM_CLASSES = 38  # PlantVillage: 38 plant/disease categories
 
 
-class SimpleNet(nn.Module):
+class PlantNet(nn.Module):
     """
-    Simple MLP for MNIST digit classification.
-    Input:  28x28 grayscale image (flattened to 784)
-    Output: 10 class logits
+    MobileNetV2 backbone with a replaced classification head.
+    pretrained=True  → start from ImageNet weights (recommended).
+    pretrained=False → random init (train from scratch).
     """
 
-    def __init__(self):
-        super(SimpleNet, self).__init__()
-        self.fc1 = nn.Linear(784, 256)
-        self.fc2 = nn.Linear(256, 128)
-        self.fc3 = nn.Linear(128, 10)
+    def __init__(self, num_classes: int = NUM_CLASSES, pretrained: bool = True):
+        super().__init__()
+        weights = models.MobileNet_V2_Weights.DEFAULT if pretrained else None
+        backbone = models.mobilenet_v2(weights=weights)
+
+        # Replace the final classifier layer
+        in_features = backbone.classifier[1].in_features  # 1280
+        backbone.classifier[1] = nn.Linear(in_features, num_classes)
+
+        self.model = backbone
 
     def forward(self, x):
-        x = x.view(-1, 784)          # Flatten
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)              # Raw logits (CrossEntropyLoss handles softmax)
-        return x
+        return self.model(x)

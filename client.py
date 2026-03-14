@@ -7,16 +7,20 @@ Each federated learning round:
   3. Send updated weights back to server
   4. Repeat until all rounds are done
 
+Dataset: PlantVillage
+  Download from Kaggle:
+      kaggle datasets download -d abdallahalidev/plantvillage-dataset
+  Extract so the folder structure is:
+      <data_dir>/
+          Apple___Apple_scab/
+          Apple___Black_rot/
+          ...  (38 folders total)
+
 Usage (PC 2):
-    python client.py --client_id 1 --server http://<SERVER_IP>:5000
+    python client.py --client_id 1 --server http://<SERVER_IP>:5000 --data_dir ./plantvillage
 
 Usage (PC 3):
-    python client.py --client_id 2 --server http://<SERVER_IP>:5000
-
-Optional flags:
-    --rounds   10    (should match server setting)
-    --epochs   2     (local training epochs per round)
-    --lr       0.01
+    python client.py --client_id 2 --server http://<SERVER_IP>:5000 --data_dir ./plantvillage
 """
 
 import argparse
@@ -31,13 +35,12 @@ import requests
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
-from model import SimpleNet
+from model import PlantNet, NUM_CLASSES
 
 
 # ─────────────────────────────────────── serialization ───────
 
 def serialize_weights(state_dict: dict) -> str:
-    """State dict  →  base64 string."""
     buf = io.BytesIO()
     torch.save(state_dict, buf)
     buf.seek(0)
@@ -45,60 +48,69 @@ def serialize_weights(state_dict: dict) -> str:
 
 
 def deserialize_weights(encoded: str) -> dict:
-    """base64 string  →  state dict."""
     buf = io.BytesIO(base64.b64decode(encoded.encode("utf-8")))
-    return torch.load(buf, map_location="cpu")
+    return torch.load(buf, map_location="cpu", weights_only=True)
 
 
 # ─────────────────────────────────────── data ────────────────
 
-def get_data_partition(client_id: int, num_clients: int = 2):
+# ImageNet normalization (matches MobileNetV2 pretrained weights)
+TRAIN_TRANSFORM = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.RandomCrop(224),
+    transforms.RandomHorizontalFlip(),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
+VAL_TRANSFORM = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
+
+def get_data_partition(data_dir: str, client_id: int, num_clients: int,
+                       batch_size: int = 32):
     """
-    Splits the MNIST training set evenly across clients.
-    client_id is 1-based (1 or 2).
+    Loads PlantVillage from data_dir (ImageFolder layout) and returns a
+    DataLoader for this client's partition of the training data.
+    client_id is 1-based.
     """
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,)),
-    ])
-    dataset = datasets.MNIST(
-        root="./data", train=True, download=True, transform=transform
-    )
-    total          = len(dataset)
+    full_dataset = datasets.ImageFolder(root=data_dir, transform=TRAIN_TRANSFORM)
+
+    total = len(full_dataset)
     partition_size = total // num_clients
-    start          = (client_id - 1) * partition_size
-    end            = start + partition_size
-    indices        = list(range(start, end))
+    start = (client_id - 1) * partition_size
+    end   = start + partition_size if client_id < num_clients else total
+    indices = list(range(start, end))
 
     loader = DataLoader(
-        Subset(dataset, indices),
-        batch_size=64,
+        Subset(full_dataset, indices),
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=2,
+        pin_memory=True,
     )
-    print(f"📦  Data partition: samples {start}–{end - 1}  ({len(indices)} samples)")
-    return loader
+    print(f"📦  Data partition: samples {start}–{end - 1}  ({len(indices)} samples, "
+          f"{len(full_dataset.classes)} classes)")
+    return loader, full_dataset.classes
 
 
-def get_test_loader():
-    """Full MNIST test set – used only for optional local evaluation."""
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,)),
-    ])
-    dataset = datasets.MNIST(
-        root="./data", train=False, download=True, transform=transform
-    )
-    return DataLoader(dataset, batch_size=256, shuffle=False, num_workers=0)
+def get_val_loader(data_dir: str, batch_size: int = 64):
+    """Full dataset with val transforms — used for optional local evaluation."""
+    dataset = datasets.ImageFolder(root=data_dir, transform=VAL_TRANSFORM)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False,
+                      num_workers=2, pin_memory=True)
 
 
 # ─────────────────────────────────────── training ────────────
 
-def train_local(model, dataloader, epochs: int, lr: float) -> float:
-    """
-    Run `epochs` passes of SGD on the local dataset.
-    Returns average loss over the last epoch.
-    """
+def train_local(model, dataloader, epochs: int, lr: float,
+                device: torch.device) -> float:
     model.train()
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
@@ -107,6 +119,7 @@ def train_local(model, dataloader, epochs: int, lr: float) -> float:
     for epoch in range(epochs):
         running_loss = 0.0
         for data, target in dataloader:
+            data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
             loss = criterion(model(data), target)
             loss.backward()
@@ -119,11 +132,11 @@ def train_local(model, dataloader, epochs: int, lr: float) -> float:
 
 
 @torch.no_grad()
-def evaluate(model, dataloader) -> float:
-    """Returns accuracy (0–100) on the provided dataloader."""
+def evaluate(model, dataloader, device: torch.device) -> float:
     model.eval()
     correct = total = 0
     for data, target in dataloader:
+        data, target = data.to(device), target.to(device)
         pred    = model(data).argmax(dim=1)
         correct += pred.eq(target).sum().item()
         total   += target.size(0)
@@ -133,10 +146,6 @@ def evaluate(model, dataloader) -> float:
 # ─────────────────────────────────────── server comms ────────
 
 def fetch_global_model(server_url: str, expected_round: int, retry_delay: int = 3):
-    """
-    Poll GET /get_model until the server is on `expected_round`.
-    Returns the decoded state dict.
-    """
     while True:
         try:
             resp = requests.get(f"{server_url}/get_model", timeout=10)
@@ -144,10 +153,7 @@ def fetch_global_model(server_url: str, expected_round: int, retry_delay: int = 
             body = resp.json()
             if body["round"] == expected_round:
                 return deserialize_weights(body["model"])
-            print(
-                f"  ⏳  Server at round {body['round']}, "
-                f"waiting for round {expected_round}…"
-            )
+            print(f"  ⏳  Server at round {body['round']}, waiting for round {expected_round}…")
         except Exception as exc:
             print(f"  ❌  GET /get_model failed: {exc}")
         time.sleep(retry_delay)
@@ -155,7 +161,6 @@ def fetch_global_model(server_url: str, expected_round: int, retry_delay: int = 
 
 def submit_weights(server_url: str, client_id: int, round_num: int,
                    state_dict: dict, retry_delay: int = 5):
-    """POST weights to server, retrying on failure."""
     payload = {
         "client_id": client_id,
         "round":     round_num,
@@ -166,7 +171,7 @@ def submit_weights(server_url: str, client_id: int, round_num: int,
             resp = requests.post(
                 f"{server_url}/submit_weights",
                 json=payload,
-                timeout=30,
+                timeout=60,
             )
             resp.raise_for_status()
             return resp.json()
@@ -178,43 +183,54 @@ def submit_weights(server_url: str, client_id: int, round_num: int,
 # ─────────────────────────────────────── main ────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="FL Edge Client")
+    parser = argparse.ArgumentParser(description="FL Edge Client — Plant Disease")
     parser.add_argument("--client_id",   type=int,   required=True,
                         help="Unique client ID (e.g. 1 or 2)")
     parser.add_argument("--server",      type=str,   default="http://localhost:5000",
                         help="Server URL  (default: http://localhost:5000)")
+    parser.add_argument("--data_dir",    type=str,   required=True,
+                        help="Path to PlantVillage dataset folder (ImageFolder layout)")
     parser.add_argument("--rounds",      type=int,   default=10,
                         help="Number of FL rounds  (default: 10)")
     parser.add_argument("--epochs",      type=int,   default=2,
                         help="Local training epochs per round  (default: 2)")
-    parser.add_argument("--lr",          type=float, default=0.01,
-                        help="SGD learning rate  (default: 0.01)")
+    parser.add_argument("--lr",          type=float, default=0.001,
+                        help="SGD learning rate  (default: 0.001)")
+    parser.add_argument("--batch_size",  type=int,   default=32,
+                        help="Batch size  (default: 32)")
     parser.add_argument("--num_clients", type=int,   default=2,
                         help="Total number of clients  (default: 2)")
+    parser.add_argument("--num_classes", type=int,   default=NUM_CLASSES,
+                        help=f"Number of plant classes  (default: {NUM_CLASSES})")
     parser.add_argument("--evaluate",    action="store_true",
-                        help="Run test-set evaluation after each round")
+                        help="Run validation accuracy after each round")
     args = parser.parse_args()
 
-    print("=" * 50)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print("=" * 55)
     print(f"    Federated Learning Client  (id={args.client_id})")
-    print("=" * 50)
-    print(f"  Server   : {args.server}")
-    print(f"  Rounds   : {args.rounds}")
-    print(f"  Epochs/r : {args.epochs}")
-    print(f"  LR       : {args.lr}")
-    print("=" * 50)
+    print("=" * 55)
+    print(f"  Server      : {args.server}")
+    print(f"  Data dir    : {args.data_dir}")
+    print(f"  Device      : {device}")
+    print(f"  Rounds      : {args.rounds}")
+    print(f"  Epochs/r    : {args.epochs}")
+    print(f"  LR          : {args.lr}")
+    print(f"  Batch size  : {args.batch_size}")
+    print("=" * 55)
 
-    # ── data ──────────────────────────────────────────────────
-    train_loader = get_data_partition(args.client_id, args.num_clients)
-    test_loader  = get_test_loader() if args.evaluate else None
+    train_loader, class_names = get_data_partition(
+        args.data_dir, args.client_id, args.num_clients, args.batch_size
+    )
+    val_loader = get_val_loader(args.data_dir, args.batch_size) if args.evaluate else None
 
-    model = SimpleNet()
+    model = PlantNet(num_classes=args.num_classes, pretrained=False).to(device)
 
-    # ── federated rounds ──────────────────────────────────────
     for round_num in range(args.rounds):
-        print(f"\n{'─'*40}")
+        print(f"\n{'─'*45}")
         print(f"  Round {round_num + 1}/{args.rounds}")
-        print(f"{'─'*40}")
+        print(f"{'─'*45}")
 
         # 1. Download global model
         print("  ⬇️   Fetching global model…")
@@ -224,17 +240,20 @@ def main():
 
         # 2. Local training
         print(f"  🏋️   Training locally for {args.epochs} epoch(s)…")
-        avg_loss = train_local(model, train_loader, args.epochs, args.lr)
+        avg_loss = train_local(model, train_loader, args.epochs, args.lr, device)
         print(f"  📉  Training loss: {avg_loss:.4f}")
 
         # Optional evaluation
-        if args.evaluate and test_loader:
-            acc = evaluate(model, test_loader)
-            print(f"  🎯  Local model accuracy on test set: {acc:.2f}%")
+        if args.evaluate and val_loader:
+            acc = evaluate(model, val_loader, device)
+            print(f"  🎯  Validation accuracy: {acc:.2f}%")
 
-        # 3. Submit weights
+        # 3. Submit weights (move to CPU first for serialization)
         print("  ⬆️   Submitting weights to server…")
-        result = submit_weights(args.server, args.client_id, round_num, model.state_dict())
+        result = submit_weights(
+            args.server, args.client_id, round_num,
+            {k: v.cpu() for k, v in model.state_dict().items()}
+        )
         print(f"  📬  Server response: {result}")
 
     print(f"\n🎉  Client {args.client_id} finished all {args.rounds} rounds!")

@@ -1,6 +1,8 @@
 """
 server.py  —  Federated Learning Server (run on PC 1)
 ─────────────────────────────────────────────────────
+Model  : MobileNetV2 fine-tuned for PlantVillage (38 plant disease classes)
+
 Responsibilities:
   1. Serve the current global model to clients  (GET  /get_model)
   2. Accept local weight updates from clients   (POST /submit_weights)
@@ -23,7 +25,7 @@ import threading
 import torch
 from flask import Flask, jsonify, request
 
-from model import SimpleNet
+from model import PlantNet, NUM_CLASSES
 
 # ─────────────────────────────────────── app & shared state ──
 app = Flask(__name__)
@@ -32,7 +34,7 @@ app = Flask(__name__)
 NUM_CLIENTS: int = 2
 TOTAL_ROUNDS: int = 10
 
-global_model = SimpleNet()
+global_model = PlantNet(pretrained=True)
 client_weights: dict = {}        # { client_id: state_dict }
 current_round: int = 0
 lock = threading.Lock()
@@ -95,7 +97,7 @@ def serialize_model(model: torch.nn.Module) -> str:
 def deserialize_weights(encoded: str) -> dict:
     """base64 string  →  state dict."""
     buf = io.BytesIO(base64.b64decode(encoded.encode("utf-8")))
-    return torch.load(buf, map_location="cpu")
+    return torch.load(buf, map_location="cpu", weights_only=True)
 
 
 def fedavg(weights_list: list) -> dict:
