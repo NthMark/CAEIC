@@ -36,11 +36,17 @@ PC 3 (Client 2) ── trains on local data partition ── sends weights ┘
 
 38 classes covering healthy and diseased leaves across multiple plant species.
 
-### Download
-```bash
+> **Only client PCs (PC 2 & PC 3) need the dataset.** The server never touches training data — it only aggregates weight tensors.
+
+### Download (PC 2 & PC 3 only)
+```cmd
 pip install kaggle
-kaggle datasets download -d abdallahalidev/plantvillage-dataset
+python -m kaggle datasets download -d abdallahalidev/plantvillage-dataset
+tar -xf plantvillage-dataset.zip
 ```
+
+> **Kaggle API key required:** Go to kaggle.com → Settings → API → Create New Token.
+> Place `kaggle.json` in `C:\Users\<YourUsername>\.kaggle\kaggle.json`.
 
 Extract so the folder structure is:
 ```

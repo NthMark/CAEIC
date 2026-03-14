@@ -34,6 +34,7 @@ import torch.optim as optim
 import requests
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
+from tqdm import tqdm
 
 from model import PlantNet, NUM_CLASSES
 
@@ -92,8 +93,8 @@ def get_data_partition(data_dir: str, client_id: int, num_clients: int,
         Subset(full_dataset, indices),
         batch_size=batch_size,
         shuffle=True,
-        num_workers=2,
-        pin_memory=True,
+        num_workers=0,   # 0 avoids multiprocessing deadlocks on Windows
+        pin_memory=False,
     )
     print(f"📦  Data partition: samples {start}–{end - 1}  ({len(indices)} samples, "
           f"{len(full_dataset.classes)} classes)")
@@ -104,7 +105,7 @@ def get_val_loader(data_dir: str, batch_size: int = 64):
     """Full dataset with val transforms — used for optional local evaluation."""
     dataset = datasets.ImageFolder(root=data_dir, transform=VAL_TRANSFORM)
     return DataLoader(dataset, batch_size=batch_size, shuffle=False,
-                      num_workers=2, pin_memory=True)
+                      num_workers=0, pin_memory=False)
 
 
 # ─────────────────────────────────────── training ────────────
@@ -118,15 +119,18 @@ def train_local(model, dataloader, epochs: int, lr: float,
 
     for epoch in range(epochs):
         running_loss = 0.0
-        for data, target in dataloader:
+        pbar = tqdm(dataloader, desc=f"    Epoch {epoch + 1}/{epochs}",
+                    unit="batch", leave=True)
+        for data, target in pbar:
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
             loss = criterion(model(data), target)
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
         last_loss = running_loss / len(dataloader)
-        print(f"    Epoch {epoch + 1}/{epochs}  loss={last_loss:.4f}")
+        print(f"    Epoch {epoch + 1}/{epochs}  avg_loss={last_loss:.4f}")
 
     return last_loss
 
@@ -207,6 +211,8 @@ def main():
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True  # faster GPU training for fixed input sizes
 
     print("=" * 55)
     print(f"    Federated Learning Client  (id={args.client_id})")

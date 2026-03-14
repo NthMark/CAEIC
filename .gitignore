@@ -1,0 +1,33 @@
+# Dataset — do not push to GitHub
+plantvillage/
+data/
+
+# Model checkpoints
+*.pth
+
+# Inference output
+test/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/

@@ -27,7 +27,7 @@ VAL_TRANSFORM = transforms.Compose([
 def get_loader(data_dir: str, batch_size: int = 64):
     dataset = datasets.ImageFolder(root=data_dir, transform=VAL_TRANSFORM)
     loader  = DataLoader(dataset, batch_size=batch_size, shuffle=False,
-                         num_workers=2, pin_memory=True)
+                         num_workers=0, pin_memory=False)
     return loader, dataset.classes
 
 
