@@ -46,16 +46,28 @@ A federated learning setup across **3 PCs** using **weighted FedAvg** to train a
 > **All 3 PCs need the dataset.** The server trains on its own partition too.
 
 ### Download (all PCs)
+
+**Way 1 — Manual download (no account needed for browser download)**
+
+1. Go to [kaggle.com/datasets/abdallahalidev/plantvillage-dataset](https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset)
+2. Click **Download** and save the zip file.
+3. Extract it:
+   ```cmd
+   tar -xf plantvillage-dataset.zip
+   ```
+
+**Way 2 — Kaggle CLI**
+
+> Requires a Kaggle API key: go to kaggle.com → Settings → API → **Create New Token**.  
+> Place `kaggle.json` in `C:\Users\<YourUsername>\.kaggle\kaggle.json`.
+
 ```cmd
 pip install kaggle
 python -m kaggle datasets download -d abdallahalidev/plantvillage-dataset
 tar -xf plantvillage-dataset.zip
 ```
 
-> **Kaggle API key required:** Go to kaggle.com → Settings → API → Create New Token.  
-> Place `kaggle.json` in `C:\Users\<YourUsername>\.kaggle\kaggle.json`.
-
-Extract so the folder structure is:
+Either way, extract so the folder structure is:
 ```
 plantvillage/
     Apple___Apple_scab/
