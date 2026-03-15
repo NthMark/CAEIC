@@ -105,17 +105,18 @@ python server.py --clients 2 --rounds 10 --data_dir ./plantvillage
 ### PC 2 — Client 1
 
 ```bash
-python client.py --client_id 1 --server http://<PC1_IP>:5000 --data_dir ./plantvillage
+python client.py --client_id 1 --server http://<PC1_IP>:5000 --data_dir ./plantvillage --max_samples 200
 ```
 
 ### PC 3 — Client 2
 
 ```bash
-python client.py --client_id 2 --server http://<PC1_IP>:5000 --data_dir ./plantvillage
+python client.py --client_id 2 --server http://<PC1_IP>:5000 --data_dir ./plantvillage --max_samples 200
 ```
 
 > Replace `<PC1_IP>` with the actual IP of PC 1 (find it with `ipconfig`).  
 > `--freeze_backbone` is **enabled automatically** on CPU-only machines.
+> Each client uses at most **200 images** from its own partition by default.
 
 ---
 
@@ -145,6 +146,7 @@ python client.py --client_id 2 --server http://<PC1_IP>:5000 --data_dir ./plantv
 | `--epochs`          | 2     | Local training epochs per round |
 | `--lr`              | 0.001 | SGD learning rate |
 | `--batch_size`      | 32    | Training batch size |
+| `--max_samples`     | 200   | Maximum local training images to use from this client's partition. Use `0` for all images. |
 | `--num_clients`     | 2     | Total number of clients (for data partitioning) |
 | `--freeze_backbone` | auto  | Freeze backbone, train only last 3 blocks + classifier. Auto-enabled on CPU. |
 | `--evaluate`        | off   | Run validation accuracy after each round |

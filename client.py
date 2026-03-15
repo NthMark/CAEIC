@@ -84,19 +84,21 @@ VAL_TRANSFORM = transforms.Compose([
 
 
 def get_data_partition(data_dir: str, client_id: int, num_clients: int,
-                       batch_size: int = 32):
+                 batch_size: int = 32, max_samples: int = 200):
     full  = datasets.ImageFolder(root=data_dir, transform=TRAIN_TRANSFORM)
     total = len(full)
     size  = total // num_clients
     start = (client_id - 1) * size
-    end   = start + size if client_id < num_clients else total
+    partition_end = start + size if client_id < num_clients else total
+    end = min(partition_end, start + max_samples) if max_samples > 0 else partition_end
     loader = DataLoader(
         Subset(full, list(range(start, end))),
         batch_size=batch_size, shuffle=True,
         num_workers=0, pin_memory=False,
     )
     print(f"  Data partition : samples {start}..{end - 1}  "
-          f"({end - start} samples, {len(full.classes)} classes)")
+        f"({end - start} samples used, capped at {max_samples}, "
+        f"{len(full.classes)} classes)")
     return loader, full.classes
 
 
@@ -216,6 +218,10 @@ def main():
                         help="SGD learning rate (default: 0.001)")
     parser.add_argument("--num_clients",     type=int,   default=2,
                         help="Total clients for data partitioning (default: 2)")
+    parser.add_argument("--max_samples",     type=int,   default=200,
+                        help="Maximum number of local training images to use "
+                             "from this client's partition (default: 200; "
+                             "use 0 to disable the cap)")
     parser.add_argument("--num_classes",     type=int,   default=NUM_CLASSES,
                         help=f"Output classes (default: {NUM_CLASSES})")
     parser.add_argument("--freeze_backbone", action="store_true",
@@ -242,6 +248,7 @@ def main():
     print(f"  Rounds          : {args.rounds}")
     print(f"  Epochs/round    : {args.epochs}")
     print(f"  Batch size      : {args.batch_size}")
+    print(f"  Max samples     : {args.max_samples if args.max_samples > 0 else 'all'}")
     print(f"  Freeze backbone : {args.freeze_backbone}")
     if args.freeze_backbone:
         print("    -> Only last 3 InvertedResidual blocks + classifier will train")
@@ -249,7 +256,8 @@ def main():
     print("=" * 58)
 
     train_loader, _ = get_data_partition(
-        args.data_dir, args.client_id, args.num_clients, args.batch_size
+        args.data_dir, args.client_id, args.num_clients,
+        args.batch_size, args.max_samples
     )
     n_train    = len(train_loader.dataset)
     val_loader = get_val_loader(args.data_dir, args.batch_size) if args.evaluate else None
