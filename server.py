@@ -59,6 +59,12 @@ from model import PlantNet, NUM_CLASSES
 # ------------------------------------------------------------------ app setup
 app = Flask(__name__)
 
+# Suppress Flask's per-request HTTP log lines (192.168.x.x - - "GET /..." 200 -)
+# They interleave with tqdm progress bars and make output unreadable.
+import logging
+log = logging.getLogger("werkzeug")
+log.setLevel(logging.ERROR)   # only show errors, not every request
+
 # Set by CLI args in main()
 NUM_CLIENTS   = 2
 TOTAL_ROUNDS  = 10

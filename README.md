@@ -1,14 +1,17 @@
 # Federated Learning — Plant Disease Detection
 
-A federated learning setup across **3 PCs** using FedAvg to train a
+A federated learning setup across **3 PCs** using **weighted FedAvg** to train a
 **MobileNetV2** model on the **PlantVillage** dataset (38 plant disease classes).
 
 ```
-PC 1 (Server)  <──────────────────────────────────────────────────┐
-       ^  GET /get_model          POST /submit_weights             │
-       │                                                           │
-PC 2 (Client 1) ── trains on local data partition ── sends weights ┤
-PC 3 (Client 2) ── trains on local data partition ── sends weights ┘
+PC 1 (Server)   trains on its own data partition
+       ^            +  runs FedAvg aggregation
+       │
+       │  GET /get_model?wait_for_round=N   (blocks until FedAvg done)
+       │  POST /submit_weights              (returns immediately)
+       │
+PC 2 (Client 1) ── trains locally ── submits weights ──┐
+PC 3 (Client 2) ── trains locally ── submits weights ──┴──> FedAvg → next round
 ```
 
 ---
@@ -18,17 +21,29 @@ PC 3 (Client 2) ── trains on local data partition ── sends weights ┘
 | File | Where it runs | Role |
 |---|---|---|
 | `model.py`     | All 3 PCs   | MobileNetV2 fine-tuned for 38 plant disease classes |
-| `server.py`    | PC 1        | Aggregates weights via FedAvg |
-| `client.py`    | PC 2 & PC 3 | Trains locally on PlantVillage partition |
+| `server.py`    | PC 1        | Trains locally + aggregates via weighted FedAvg |
+| `client.py`    | PC 2 & PC 3 | Trains locally, submits weights once per round |
 | `evaluate.py`  | Any PC      | Evaluates checkpoint accuracy on the full dataset |
-| `infer.py`     | Any PC      | Runs inference on dataset samples or your own images |
+| `infer.py`     | Any PC      | Runs inference on dataset samples or custom images |
 
-### FL Round (repeated N times)
-1. Client downloads global model  →  `GET /get_model`
-2. Client trains locally on its PlantVillage partition
-3. Client uploads updated weights  →  `POST /submit_weights`
-4. Server runs **FedAvg** when all clients have submitted
-5. Server increments round counter → repeat
+### How a round works
+1. All nodes (server + clients) **fetch the current global model** from the server.  
+   `GET /get_model?wait_for_round=N` — blocks until FedAvg for round N-1 is complete.
+2. Each node **trains locally** on its own data partition (no network traffic during training).
+3. Each node **submits its trained weights** to the server.  
+   `POST /submit_weights` — returns immediately; the caller is never blocked.
+4. Once **all nodes** (server + all clients) have submitted, the server runs  
+   **weighted FedAvg** — weights are averaged proportionally to each node's dataset size.
+5. Round counter increments → everyone fetches the new model → repeat.
+
+### Key design decisions
+
+| Property | Detail |
+|---|---|
+| **No per-batch synchronisation** | Unlike EdgeFed, clients never wait for the server mid-epoch. The only sync point is one FedAvg per round. |
+| **Server is a full participant** | Server trains on its own data partition AND runs aggregation — computation is truly shared. |
+| **Auto freeze backbone on CPU** | CPU-only clients automatically freeze the MobileNetV2 backbone and only train the last 3 InvertedResidual blocks + classifier (~0.3 M params instead of 3.4 M — ~10× faster). |
+| **FedAvg trigger** | FedAvg fires exactly when the last expected submission arrives (thread-safe via `threading.Condition`). |
 
 ---
 
@@ -36,16 +51,16 @@ PC 3 (Client 2) ── trains on local data partition ── sends weights ┘
 
 38 classes covering healthy and diseased leaves across multiple plant species.
 
-> **Only client PCs (PC 2 & PC 3) need the dataset.** The server never touches training data — it only aggregates weight tensors.
+> **All 3 PCs need the dataset.** The server trains on its own partition too.
 
-### Download (PC 2 & PC 3 only)
+### Download (all PCs)
 ```cmd
 pip install kaggle
 python -m kaggle datasets download -d abdallahalidev/plantvillage-dataset
 tar -xf plantvillage-dataset.zip
 ```
 
-> **Kaggle API key required:** Go to kaggle.com → Settings → API → Create New Token.
+> **Kaggle API key required:** Go to kaggle.com → Settings → API → Create New Token.  
 > Place `kaggle.json` in `C:\Users\<YourUsername>\.kaggle\kaggle.json`.
 
 Extract so the folder structure is:
@@ -58,7 +73,7 @@ plantvillage/
     ...  (38 folders total)
 ```
 
-Copy the `plantvillage/` folder to **each client PC**.
+Copy the `plantvillage/` folder to **each PC**.
 
 ---
 
@@ -81,55 +96,65 @@ Copy these files to **each PC**:
 ### PC 1 — Server
 
 ```bash
-python server.py --clients 2 --rounds 10 --port 5000
+python server.py --clients 2 --rounds 10 --data_dir ./plantvillage
 ```
 
-> Run as **Administrator** so the firewall rule for port 5000 is created automatically.
+> Run as **Administrator** so the firewall rule for port 5000 is created automatically.  
+> Without `--data_dir` the server runs as a **pure aggregator** (no local training).
 
 ### PC 2 — Client 1
 
 ```bash
-python client.py --client_id 1 --server http://<PC1_IP>:5000 --data_dir ./plantvillage --rounds 10
+python client.py --client_id 1 --server http://<PC1_IP>:5000 --data_dir ./plantvillage
 ```
 
 ### PC 3 — Client 2
 
 ```bash
-python client.py --client_id 2 --server http://<PC1_IP>:5000 --data_dir ./plantvillage --rounds 10
+python client.py --client_id 2 --server http://<PC1_IP>:5000 --data_dir ./plantvillage
 ```
 
-> Replace `<PC1_IP>` with the actual IP of PC 1.
-> Find it with `ipconfig` (Windows) or `ip a` (Linux).
+> Replace `<PC1_IP>` with the actual IP of PC 1 (find it with `ipconfig`).  
+> `--freeze_backbone` is **enabled automatically** on CPU-only machines.
 
 ---
 
 ## Optional flags
 
-### client.py
-| Flag | Default | Description |
-|---|---|---|
-| `--client_id`   | required | Unique ID for this client (1 or 2) |
-| `--server`      | `http://localhost:5000` | Server URL |
-| `--data_dir`    | required | Path to PlantVillage dataset folder |
-| `--rounds`      | 10 | Number of FL rounds |
-| `--epochs`      | 2  | Local training epochs per round |
-| `--lr`          | 0.001 | SGD learning rate |
-| `--batch_size`  | 32 | Training batch size |
-| `--num_clients` | 2  | Total number of clients |
-| `--evaluate`    | off | Run validation accuracy after each round |
-
 ### server.py
+
 | Flag | Default | Description |
 |---|---|---|
-| `--clients` | 2    | Number of edge clients to wait for |
-| `--rounds`  | 10   | Total FL rounds |
-| `--port`    | 5000 | Listening port |
+| `--clients`     | 2    | Number of remote clients to wait for per round |
+| `--rounds`      | 10   | Total FL rounds |
+| `--port`        | 5000 | Listening port |
+| `--lr`          | 0.001 | SGD learning rate for server local training |
+| `--epochs`      | 2    | Server local training epochs per round |
+| `--batch_size`  | 32   | Server training batch size |
+| `--data_dir`    | —    | Server data partition (ImageFolder layout). Omit for pure aggregator. |
+| `--num_classes` | 38   | Number of output classes |
+
+### client.py
+
+| Flag | Default | Description |
+|---|---|---|
+| `--client_id`       | required | Unique ID for this client (1-based, e.g. 1 or 2) |
+| `--server`          | `http://localhost:5000` | Server URL |
+| `--data_dir`        | required | Path to PlantVillage dataset folder |
+| `--rounds`          | 10    | Number of FL rounds |
+| `--epochs`          | 2     | Local training epochs per round |
+| `--lr`              | 0.001 | SGD learning rate |
+| `--batch_size`      | 32    | Training batch size |
+| `--num_clients`     | 2     | Total number of clients (for data partitioning) |
+| `--freeze_backbone` | auto  | Freeze backbone, train only last 3 blocks + classifier. Auto-enabled on CPU. |
+| `--evaluate`        | off   | Run validation accuracy after each round |
+| `--num_classes`     | 38    | Number of output classes |
 
 ---
 
 ## Evaluate the checkpoint
 
-After training, `global_model_final.pth` is saved on the server. Evaluate it:
+After training, `global_model_final.pth` is saved on the server. Copy it to any PC and evaluate:
 
 ```bash
 # Overall accuracy
@@ -145,7 +170,7 @@ python evaluate.py --data_dir ./plantvillage --per_class
 | `--data_dir`    | required | Path to PlantVillage dataset |
 | `--checkpoint`  | `global_model_final.pth` | Path to checkpoint |
 | `--per_class`   | off | Show accuracy for each of the 38 classes |
-| `--batch_size`  | 64 | Evaluation batch size |
+| `--batch_size`  | 64  | Evaluation batch size |
 
 ---
 
@@ -177,7 +202,7 @@ python infer.py --image a.jpg b.jpg c.jpg
 | `--save`        | off | Save output images to `--out_dir` |
 | `--out_dir`     | `test` | Folder to save extracted images |
 
-Saved filenames encode the result for easy visual inspection:
+Saved filenames encode the result:
 ```
 42_Apple___Apple_scab_pred-Apple___Apple_scab_OK_97pct.jpg
 105_Tomato___healthy_pred-Tomato___Late_blight_WRONG_54pct.jpg
