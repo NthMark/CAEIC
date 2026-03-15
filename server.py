@@ -52,6 +52,7 @@ import torch.optim as optim
 from flask import Flask, jsonify, request
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+from tqdm import tqdm
 
 from model import PlantNet, NUM_CLASSES
 
@@ -294,16 +295,31 @@ def server_training_loop(data_dir: str, num_classes: int) -> None:
         # ---- 2. Train locally (no lock held -- concurrent with clients) ----
         for epoch in range(SERVER_EPOCHS):
             local_model.train()
-            total_loss = 0.0
-            for data, target in loader:
+            total_loss = correct = total = 0
+
+            pbar = tqdm(
+                loader,
+                desc=f"[Server] R{round_num + 1}/{TOTAL_ROUNDS} "
+                     f"E{epoch + 1}/{SERVER_EPOCHS}",
+                unit="batch",
+                leave=True,
+            )
+            for data, target in pbar:
                 data, target = data.to(device), target.to(device)
                 optimizer.zero_grad()
-                loss = criterion(local_model(data), target)
+                output = local_model(data)
+                loss   = criterion(output, target)
                 loss.backward()
                 optimizer.step()
+
                 total_loss += loss.item()
+                correct    += output.argmax(1).eq(target).sum().item()
+                total      += target.size(0)
+                pbar.set_postfix(loss=f"{loss.item():.3f}",
+                                 acc=f"{100 * correct / total:.1f}%")
+
             avg = total_loss / len(loader)
-            print(f"[Server trainer] R{round_num} E{epoch + 1}/{SERVER_EPOCHS} "
+            print(f"[Server] R{round_num + 1} E{epoch + 1}/{SERVER_EPOCHS} "
                   f"avg_loss={avg:.4f}")
 
         # ---- 3. Submit weights for FedAvg ----
