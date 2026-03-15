@@ -1,7 +1,7 @@
 # Federated Learning — Plant Disease Detection
 A federated learning setup across **3 PCs** using **weighted FedAvg** to train a
 **MobileNetV2** model on the **PlantVillage** dataset (38 plant disease classes).
-![Pipeline](pipeline.png)
+![Pipeline](pipeline_federated_training.png)
 
 A federated learning setup across **3 PCs** using **weighted FedAvg** to train a
 **MobileNetV2** model on the **PlantVillage** dataset (38 plant disease classes).
