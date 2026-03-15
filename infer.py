@@ -11,8 +11,9 @@ Usage:
     python infer.py --image leaf.jpg
     python infer.py --image a.jpg b.jpg c.jpg
 
-    # Save extracted samples to ./test/ for visual inspection
-    python infer.py --data_dir ./plantvillage --samples 20 --save
+    # Save annotated images (bounding box + label) to ./results/
+    python infer.py --data_dir ./plantvillage --samples 20 --save --out_dir results
+    python infer.py --image leaf.jpg --save
 """
 
 import argparse
@@ -22,7 +23,7 @@ import sys
 
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from torchvision import datasets, transforms
 
 from model import PlantNet, NUM_CLASSES
@@ -60,17 +61,49 @@ def predict_tensor(model, tensor: torch.Tensor, device) -> tuple[int, float]:
     return cls.item(), conf.item() * 100.0
 
 
-def save_sample(raw_img: Image.Image, idx: int, true_label: str,
-                pred_label: str, conf: float, out_dir: str) -> str:
-    """Save image scaled to 224x224 with result encoded in filename."""
-    img = raw_img.resize((224, 224), Image.BILINEAR)
-    ok = "OK" if pred_label == true_label else "WRONG"
-    # Shorten class names to keep filenames manageable
-    true_short = true_label[:30]
-    pred_short = pred_label[:30]
-    filename = f"{idx}_{true_short}_pred-{pred_short}_{ok}_{conf:.0f}pct.jpg"
-    img.save(os.path.join(out_dir, filename))
-    return filename
+def annotate_and_save(raw_img: Image.Image, save_path: str,
+                      pred_label: str, conf: float,
+                      true_label: str = None) -> None:
+    """Draw a coloured border + predicted label bar on the image and save it.
+
+    Border / label bar colour:
+      green — correct prediction  (true_label given and matches pred_label)
+      red   — wrong prediction    (true_label given but differs)
+      blue  — standalone image    (no true_label)
+    """
+    img  = raw_img.resize((224, 224), Image.BILINEAR).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+
+    if true_label is None:
+        color = (30, 120, 255)          # blue  — standalone image
+    elif pred_label == true_label:
+        color = (0, 200, 60)            # green — correct
+    else:
+        color = (220, 30, 30)           # red   — wrong
+
+    # Bounding box: thick coloured border around the whole image
+    border = 5
+    draw.rectangle([0, 0, w - 1, h - 1], outline=color, width=border)
+
+    # Show only the disease/species part after '___' to keep text short
+    short_name = pred_label.split("___")[-1] if "___" in pred_label else pred_label
+    text = f"{short_name}  {conf:.1f}%"
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 14)
+    except OSError:
+        font = ImageFont.load_default()
+
+    # Filled colour bar at the bottom with white label text
+    px  = draw.textbbox((0, 0), text, font=font)
+    tw, th = px[2] - px[0], px[3] - px[1]
+    pad = 4
+    y0  = h - th - 2 * pad - border
+    draw.rectangle([border, y0, border + tw + 2 * pad, h - border], fill=color)
+    draw.text((border + pad, y0 + pad), text, fill=(255, 255, 255), font=font)
+
+    img.save(save_path)
 
 
 def run_dataset_inference(model, data_dir: str, indices: list[int],
@@ -98,7 +131,12 @@ def run_dataset_inference(model, data_dir: str, indices: list[int],
         filename = ""
         if save:
             raw_img, _ = raw_dataset[idx]
-            filename = save_sample(raw_img, idx, true_label, pred_label, conf, out_dir)
+            ok_tag     = "OK" if pred_idx == true_idx else "WRONG"
+            true_short = true_label[:30]
+            pred_short = pred_label[:30]
+            filename   = f"{idx}_{true_short}_pred-{pred_short}_{ok_tag}_{conf:.0f}pct.jpg"
+            annotate_and_save(raw_img, os.path.join(out_dir, filename),
+                              pred_label, conf, true_label=true_label)
 
         print(f"  {idx:<8} {true_label:<40} {pred_label:<40} {conf:>7.1f}% {ok:>5}"
               + (f"  -> {filename}" if save else ""))
@@ -108,7 +146,11 @@ def run_dataset_inference(model, data_dir: str, indices: list[int],
         print(f"  Saved to : {os.path.abspath(out_dir)}")
 
 
-def run_image_inference(model, image_paths: list[str], class_names: list[str], device):
+def run_image_inference(model, image_paths: list[str], class_names: list[str],
+                        device, save: bool = False, out_dir: str = "results"):
+    if save:
+        os.makedirs(out_dir, exist_ok=True)
+
     for path in image_paths:
         try:
             img    = Image.open(path).convert("RGB")
@@ -118,11 +160,23 @@ def run_image_inference(model, image_paths: list[str], class_names: list[str], d
             print(f"  Image      : {path}")
             print(f"  Prediction : {label}")
             print(f"  Confidence : {conf:.2f}%")
+
+            if save:
+                base     = os.path.splitext(os.path.basename(path))[0]
+                short    = label.split("___")[-1] if "___" in label else label
+                filename = f"{base}_pred-{short}_{conf:.0f}pct.jpg"
+                out_path = os.path.join(out_dir, filename)
+                annotate_and_save(img, out_path, label, conf)
+                print(f"  Saved      : {out_path}")
+
             print()
         except FileNotFoundError:
             print(f"  ERROR: File not found -- {path}", file=sys.stderr)
         except Exception as exc:
             print(f"  ERROR: {exc}", file=sys.stderr)
+
+    if save:
+        print(f"  Saved to : {os.path.abspath(out_dir)}")
 
 
 def main():
@@ -175,7 +229,8 @@ def main():
         # For standalone image inference, derive class names from the checkpoint
         # folder name pattern or just show numeric index
         class_names = [str(i) for i in range(args.num_classes)]
-        run_image_inference(model, args.image, class_names, device)
+        run_image_inference(model, args.image, class_names, device,
+                            save=args.save, out_dir=args.out_dir)
 
     print()
 

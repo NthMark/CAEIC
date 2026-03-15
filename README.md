@@ -1,18 +1,10 @@
 # Federated Learning — Plant Disease Detection
+A federated learning setup across **3 PCs** using **weighted FedAvg** to train a
+**MobileNetV2** model on the **PlantVillage** dataset (38 plant disease classes).
+![Pipeline](pipeline.png)
 
 A federated learning setup across **3 PCs** using **weighted FedAvg** to train a
 **MobileNetV2** model on the **PlantVillage** dataset (38 plant disease classes).
-
-```
-PC 1 (Server)   trains on its own data partition
-       ^            +  runs FedAvg aggregation
-       │
-       │  GET /get_model?wait_for_round=N   (blocks until FedAvg done)
-       │  POST /submit_weights              (returns immediately)
-       │
-PC 2 (Client 1) ── trains locally ── submits weights ──┐
-PC 3 (Client 2) ── trains locally ── submits weights ──┴──> FedAvg → next round
-```
 
 ---
 
@@ -20,11 +12,10 @@ PC 3 (Client 2) ── trains locally ── submits weights ──┴──> Fe
 
 | File | Where it runs | Role |
 |---|---|---|
-| `model.py`     | All 3 PCs   | MobileNetV2 fine-tuned for 38 plant disease classes |
-| `server.py`    | PC 1        | Trains locally + aggregates via weighted FedAvg |
-| `client.py`    | PC 2 & PC 3 | Trains locally, submits weights once per round |
-| `evaluate.py`  | Any PC      | Evaluates checkpoint accuracy on the full dataset |
-| `infer.py`     | Any PC      | Runs inference on dataset samples or custom images |
+| `model.py`  | All 3 PCs   | MobileNetV2 fine-tuned for 38 plant disease classes |
+| `server.py` | PC 1        | Trains locally + aggregates via weighted FedAvg |
+| `client.py` | PC 2 & PC 3 | Trains locally, submits weights once per round |
+| `infer.py`  | Any PC      | Runs inference on the saved checkpoint |
 
 ### How a round works
 1. All nodes (server + clients) **fetch the current global model** from the server.  
@@ -44,6 +35,7 @@ PC 3 (Client 2) ── trains locally ── submits weights ──┴──> Fe
 | **Server is a full participant** | Server trains on its own data partition AND runs aggregation — computation is truly shared. |
 | **Auto freeze backbone on CPU** | CPU-only clients automatically freeze the MobileNetV2 backbone and only train the last 3 InvertedResidual blocks + classifier (~0.3 M params instead of 3.4 M — ~10× faster). |
 | **FedAvg trigger** | FedAvg fires exactly when the last expected submission arrives (thread-safe via `threading.Condition`). |
+| **Data cap per client** | Each client trains on at most `--max_samples` images (default 200). Use `--max_samples 0` to disable the cap. |
 
 ---
 
@@ -88,6 +80,7 @@ Copy these files to **each PC**:
 - `requirements.txt`
 - `server.py`  (PC 1 only)
 - `client.py`  (PC 2 & PC 3 only)
+- `infer.py`   (any PC you want to run inference from)
 
 ---
 
@@ -154,76 +147,73 @@ python client.py --client_id 2 --server http://<PC1_IP>:5000 --data_dir ./plantv
 
 ---
 
-## Evaluate the checkpoint
+## Output
 
-After training, `global_model_final.pth` is saved on the server. Copy it to any PC and evaluate:
-
-```bash
-# Overall accuracy
-python evaluate.py --data_dir ./plantvillage
-
-# With per-class breakdown (all 38 classes)
-python evaluate.py --data_dir ./plantvillage --per_class
-```
-
-### evaluate.py flags
-| Flag | Default | Description |
-|---|---|---|
-| `--data_dir`    | required | Path to PlantVillage dataset |
-| `--checkpoint`  | `global_model_final.pth` | Path to checkpoint |
-| `--per_class`   | off | Show accuracy for each of the 38 classes |
-| `--batch_size`  | 64  | Evaluation batch size |
+After all rounds complete, `global_model_final.pth` is saved on **PC 1** (the server).  
+Copy this file (along with `model.py`) to any machine to run inference.
 
 ---
 
 ## Inference
 
 ```bash
-# 10 random samples from the dataset
-python infer.py --data_dir ./plantvillage --samples 10
+# 10 random samples from the PlantVillage dataset
+python infer.py --data_dir ./plantvillage
 
-# Save images to ./test/ for visual inspection (filenames contain true/pred labels)
-python infer.py --data_dir ./plantvillage --samples 20 --save
+# 20 random samples — save annotated images (border + label) to ./results/
+python infer.py --data_dir ./plantvillage --samples 20 --save --out_dir results
 
 # One specific sample by dataset index
 python infer.py --data_dir ./plantvillage --index 42
 
-# Your own plant image
+# Your own image file(s)
 python infer.py --image leaf.jpg
 python infer.py --image a.jpg b.jpg c.jpg
+
+# Your own images — save annotated copies to ./results/
+python infer.py --image leaf.jpg --save --out_dir results
+
+# Different checkpoint
+python infer.py --data_dir ./plantvillage --checkpoint my_model.pth
+```
+
+Output in dataset mode:
+
+```
+  Index    True Label                               Predicted                                Conf    OK
+  ---------------------------------------------------------------------------------------------------------
+  10423    Tomato___Late_blight                     Tomato___Late_blight                      94.3%     V
+  3187     Apple___Apple_scab                       Apple___Cedar_apple_rust                  61.0%     X
+  ...
+  Accuracy : 9/10 (90.0%)
+```
+
+When `--save` is used, each image is annotated and saved to `--out_dir`:
+
+- **Green border** + label bar — correct prediction  
+- **Red border** + label bar — wrong prediction  
+- **Blue border** + label bar — standalone `--image` file (no ground truth)
+
+The label bar shows the disease name and confidence, e.g. `Late_blight  94.3%`.
+
+Saved filenames encode the result:
+
+```
+3187_Apple___Apple_scab_pred-Apple___Cedar_apple_rust_WRONG_61pct.jpg
 ```
 
 ### infer.py flags
+
 | Flag | Default | Description |
 |---|---|---|
-| `--data_dir`    | — | PlantVillage folder (mutually exclusive with `--image`) |
-| `--image`       | — | One or more image file paths |
-| `--checkpoint`  | `global_model_final.pth` | Path to checkpoint |
+| `--data_dir`    | — | PlantVillage folder — picks random test samples (mutually exclusive with `--image`) |
+| `--image`       | — | One or more image file paths (mutually exclusive with `--data_dir`) |
 | `--samples`     | 10 | Number of random samples when using `--data_dir` |
-| `--index`       | — | Specific dataset index to predict |
-| `--save`        | off | Save output images to `--out_dir` |
-| `--out_dir`     | `test` | Folder to save extracted images |
-
-Saved filenames encode the result:
-```
-42_Apple___Apple_scab_pred-Apple___Apple_scab_OK_97pct.jpg
-105_Tomato___healthy_pred-Tomato___Late_blight_WRONG_54pct.jpg
-```
-
----
-
-## Load the checkpoint manually
-
-```python
-from model import PlantNet
-import torch
-
-model = PlantNet(num_classes=38, pretrained=False)
-model.load_state_dict(torch.load("global_model_final.pth", weights_only=True))
-model.eval()
-```
-
----
+| `--index`       | — | Predict a specific sample by dataset index instead of random |
+| `--save`        | off | Save annotated images (bounding box + label bar) to `--out_dir`. Works with both `--data_dir` and `--image`. |
+| `--out_dir`     | `test` | Folder to save annotated output images |
+| `--checkpoint`  | `global_model_final.pth` | Path to trained model checkpoint |
+| `--num_classes` | 38 | Number of output classes |
 
 ## Firewall note (Windows)
 
